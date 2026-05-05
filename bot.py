@@ -1,20 +1,18 @@
 import asyncio
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import config
 from database import *
 
 bot = Bot(token=config.BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-scheduler = AsyncIOScheduler()
 
 # ========== СОСТОЯНИЯ ==========
 class AdminStates(StatesGroup):
@@ -31,6 +29,24 @@ class AdminStates(StatesGroup):
     waiting_giveaway_end_date = State()
     waiting_giveaway_channels = State()
     waiting_check_user = State()
+
+# ========== ПРОВЕРКА ПОДПИСКИ ==========
+async def check_subscription(user_id):
+    """Проверяет подписку на обязательный канал"""
+    try:
+        # Пробуем получить информацию о пользователе в канале
+        member = await bot.get_chat_member(chat_id=f"@{config.REQUIRED_CHANNEL}", user_id=user_id)
+        
+        # Статусы, которые считаются подпиской
+        if member.status in ['member', 'administrator', 'creator']:
+            return True
+        if member.status == 'restricted' and member.is_member:
+            return True
+        return False
+    except Exception as e:
+        print(f"Ошибка проверки подписки для {user_id}: {e}")
+        # Если ошибка - считаем что не подписан (безопаснее)
+        return False
 
 # ========== КЛАВИАТУРЫ ==========
 def main_menu():
@@ -58,28 +74,6 @@ def admin_panel():
         [InlineKeyboardButton(text="🔍 Проверить пользователя", callback_data="admin_check_user")]
     ])
 
-# ========== ПРОВЕРКА ПОДПИСКИ ==========
-async def check_subscription(user_id):
-    """Проверяет подписку на обязательный канал"""
-    try:
-        member = await bot.get_chat_member(config.REQUIRED_CHANNEL, user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except:
-        return False
-
-async def check_all_subscriptions(user_id):
-    """Проверяет подписку на все каналы"""
-    channels = get_all_channels()
-    not_subscribed = []
-    for ch in channels:
-        try:
-            member = await bot.get_chat_member(ch[1], user_id)
-            if member.status not in ['member', 'administrator', 'creator']:
-                not_subscribed.append(ch[2])
-        except:
-            not_subscribed.append(ch[2])
-    return not_subscribed
-
 # ========== СТАРТ ==========
 @dp.message(Command("start"))
 async def start(msg: types.Message):
@@ -101,14 +95,16 @@ async def start(msg: types.Message):
     add_user(user_id, username, ref)
     
     # Проверка подписки на обязательный канал
-    if not await check_subscription(user_id):
+    is_subscribed = await check_subscription(user_id)
+    
+    if not is_subscribed:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Подписаться на канал", url=config.REQUIRED_CHANNEL_LINK)],
-            [InlineKeyboardButton(text="🔄 Проверить подписку", callback_data="check_sub")]
+            [InlineKeyboardButton(text="📢 ПОДПИСАТЬСЯ НА КАНАЛ", url=f"https://t.me/{config.REQUIRED_CHANNEL}")],
+            [InlineKeyboardButton(text="🔄 ПРОВЕРИТЬ ПОДПИСКУ", callback_data="check_sub")]
         ])
         await msg.answer(
             f"⚠️ *Для использования бота необходимо подписаться на канал!*\n\n"
-            f"👉 [{config.REQUIRED_CHANNEL}]({config.REQUIRED_CHANNEL_LINK})\n\n"
+            f"👉 *Канал:* [{config.REQUIRED_CHANNEL}](https://t.me/{config.REQUIRED_CHANNEL})\n\n"
             f"После подписки нажмите «Проверить подписку»",
             parse_mode="Markdown", reply_markup=keyboard, disable_web_page_preview=True
         )
@@ -130,10 +126,20 @@ async def start(msg: types.Message):
 @dp.callback_query(F.data == "check_sub")
 async def check_subscription_handler(call: types.CallbackQuery):
     user_id = call.from_user.id
+    
     if await check_subscription(user_id):
         await call.message.edit_text("✅ Спасибо за подписку! Добро пожаловать в бот.", reply_markup=main_menu())
     else:
-        await call.answer("❌ Вы не подписаны на канал!", show_alert=True)
+        # Показываем кнопку снова
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📢 ПОДПИСАТЬСЯ НА КАНАЛ", url=f"https://t.me/{config.REQUIRED_CHANNEL}")],
+            [InlineKeyboardButton(text="🔄 ПРОВЕРИТЬ ПОДПИСКУ", callback_data="check_sub")]
+        ])
+        await call.message.edit_text(
+            f"❌ Вы не подписаны на канал!\n\n"
+            f"👉 [Подпишитесь на {config.REQUIRED_CHANNEL}](https://t.me/{config.REQUIRED_CHANNEL})",
+            parse_mode="Markdown", reply_markup=keyboard, disable_web_page_preview=True
+        )
 
 @dp.message(Command("admin"))
 async def admin(msg: types.Message):
@@ -191,11 +197,12 @@ async def complete_task(call: types.CallbackQuery):
     
     # Проверка подписки на канал задания
     try:
-        member = await bot.get_chat_member(channel_id, user_id)
+        member = await bot.get_chat_member(chat_id=f"@{channel_id}", user_id=user_id)
         if member.status not in ['member', 'administrator', 'creator']:
             await call.answer("❌ Вы не подписаны на этот канал!", show_alert=True)
             return
-    except:
+    except Exception as e:
+        print(f"Ошибка проверки канала {channel_id}: {e}")
         await call.answer("❌ Не удалось проверить подписку", show_alert=True)
         return
     
@@ -280,6 +287,25 @@ async def process_withdraw(msg: types.Message, state: FSMContext):
         
     except ValueError:
         await msg.answer("❌ Введите число (например: 15 или 20.5)")
+
+# ========== РЕФЕРАЛКА ==========
+@dp.callback_query(F.data == "referral")
+async def referral(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    bot_info = await bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={user_id}"
+    
+    await call.message.edit_text(
+        f"👥 *Приглашай друзей и зарабатывай!*\n\n"
+        f"🔗 Твоя реферальная ссылка:\n`{link}`\n\n"
+        f"📌 *Как это работает:*\n"
+        f"• Друг переходит по ссылке\n"
+        f"• Выполняет 3 любых задания\n"
+        f"• Ты получаешь +3⭐\n\n"
+        f"👥 *Приглашено:* {get_user(user_id)[4]} друзей",
+        reply_markup=main_menu(),
+        parse_mode="Markdown"
+    )
 
 # ========== ЕЖЕДНЕВНЫЙ БОНУС ==========
 @dp.callback_query(F.data == "daily")
@@ -408,7 +434,10 @@ async def show_giveaways(call: types.CallbackQuery):
         text += f"📌 *{title}*\n🏆 Приз: {prize}\n⏰ Осталось: {int(hours)} ч.\n\n"
         buttons.append([InlineKeyboardButton(text=f"🎲 Участвовать в {title}", callback_data=f"join_giveaway_{g_id}")])
     
-    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    if buttons:
+        await call.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    else:
+        await call.message.edit_text(text, parse_mode="Markdown", reply_markup=main_menu())
 
 @dp.callback_query(F.data.startswith("join_giveaway_"))
 async def join_giveaway(call: types.CallbackQuery):
@@ -420,25 +449,25 @@ async def join_giveaway(call: types.CallbackQuery):
         await call.answer("Розыгрыш не найден", show_alert=True)
         return
     
-    # Проверка подписки на каналы
+    # Проверка подписки на обязательный канал
+    if not await check_subscription(user_id):
+        await call.answer("❌ Подпишитесь на обязательный канал!", show_alert=True)
+        return
+    
+    # Проверка подписки на каналы спонсоров
     required = giveaway[5]
     if required:
         channels = required.split(',')
-        not_subbed = []
         for ch in channels:
-            try:
-                member = await bot.get_chat_member(ch, user_id)
-                if member.status not in ['member', 'administrator', 'creator']:
-                    not_subbed.append(ch)
-            except:
-                not_subbed.append(ch)
-        
-        if not_subbed:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📢 Подписаться", url=f"https://t.me/{ch}") for ch in not_subbed[:2]]
-            ])
-            await call.answer("❌ Подпишитесь на каналы спонсоров!", show_alert=True)
-            return
+            if ch.strip():
+                try:
+                    member = await bot.get_chat_member(chat_id=f"@{ch.strip()}", user_id=user_id)
+                    if member.status not in ['member', 'administrator', 'creator']:
+                        await call.answer(f"❌ Подпишитесь на канал @{ch}", show_alert=True)
+                        return
+                except:
+                    await call.answer(f"❌ Не удалось проверить подписку на @{ch}", show_alert=True)
+                    return
     
     add_participant(giveaway_id, user_id)
     await call.answer("✅ Вы участвуете в розыгрыше! Удачи!", show_alert=True)
@@ -458,14 +487,18 @@ async def check_user_result(msg: types.Message, state: FSMContext):
     if query.startswith('@'):
         user = get_user_by_username(query[1:])
     else:
-        user = get_user(int(query))
+        try:
+            user = get_user(int(query))
+        except:
+            user = None
     
     if not user:
         await msg.answer("❌ Пользователь не найден")
         await state.clear()
         return
     
-    not_subbed = await check_all_subscriptions(user[0])
+    # Проверяем подписку на обязательный канал
+    is_subbed = await check_subscription(user[0])
     
     text = (
         f"🔍 *Информация о пользователе*\n\n"
@@ -475,13 +508,9 @@ async def check_user_result(msg: types.Message, state: FSMContext):
         f"🚫 Статус: {'Заблокирован' if user[3] else 'Активен'}\n"
         f"👥 Рефералов: {user[4]}\n"
         f"📋 Выполнено заданий: {user[6]}\n\n"
-        f"📢 *Подписки:*\n"
+        f"📢 *Обязательный канал:*\n"
+        f"{'✅ Подписан' if is_subbed else '❌ НЕ ПОДПИСАН'}"
     )
-    
-    if not_subbed:
-        text += f"❌ Не подписан: {', '.join(not_subbed)}"
-    else:
-        text += "✅ Подписан на все каналы"
     
     await msg.answer(text, parse_mode="Markdown")
     await state.clear()
@@ -523,7 +552,7 @@ async def create_giveaway_step5(msg: types.Message, state: FSMContext):
     
     giveaway_id = add_giveaway(data['title'], data['prize'], data['end_date'], channels)
     
-    # Публикация в канале @UralchikStars
+    # Публикация в канале
     text = (
         f"🎉 *НОВЫЙ РОЗЫГРЫШ!* 🎉\n\n"
         f"📌 *{data['title']}*\n"
@@ -532,16 +561,16 @@ async def create_giveaway_step5(msg: types.Message, state: FSMContext):
         f"👉 Участвовать в боте: @{config.REQUIRED_CHANNEL}\n"
     )
     
-    if channels:
+    if channels and channels != "0":
         text += f"\n📢 *Обязательная подписка:*\n"
         for ch in channels.split(','):
-            text += f"• @{ch}\n"
+            if ch.strip():
+                text += f"• @{ch.strip()}\n"
     
     try:
-        sent = await bot.send_message(config.REQUIRED_CHANNEL, text, parse_mode="Markdown")
-        set_giveaway_message_id(giveaway_id, sent.message_id)
-    except:
-        pass
+        await bot.send_message(f"@{config.REQUIRED_CHANNEL}", text, parse_mode="Markdown")
+    except Exception as e:
+        print(f"Ошибка отправки в канал: {e}")
     
     await msg.answer(f"✅ Розыгрыш «{data['title']}» создан!", reply_markup=admin_panel())
     await state.clear()
@@ -563,7 +592,7 @@ async def add_channel_step2(msg: types.Message, state: FSMContext):
 @dp.message(AdminStates.waiting_channel_name)
 async def add_channel_step3(msg: types.Message, state: FSMContext):
     await state.update_data(name=msg.text.strip())
-    await msg.answer("⭐ Введите Stars за подписку (0.25):", parse_mode="Markdown")
+    await msg.answer("⭐ Введите Stars за подписку (0.25):")
     await state.set_state(AdminStates.waiting_channel_stars)
 
 @dp.message(AdminStates.waiting_channel_stars)
@@ -763,6 +792,7 @@ async def send_broadcast(msg: types.Message, state: FSMContext):
     await status_msg.edit_text(f"✅ Рассылка завершена!\n📨 Доставлено: {success}\n❌ Ошибок: {fail}")
     await state.clear()
 
+# ========== НАЗАД ==========
 @dp.callback_query(F.data == "admin_back")
 async def back_to_admin(call: types.CallbackQuery):
     await call.message.edit_text("🛠 Админ-панель", reply_markup=admin_panel())
@@ -774,8 +804,8 @@ async def back_to_menu(call: types.CallbackQuery):
 # ========== ЗАПУСК ==========
 async def main():
     init_db()
-    scheduler.start()
     print("🤖 Бот запущен!")
+    print(f"✅ Обязательный канал: @{config.REQUIRED_CHANNEL}")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
