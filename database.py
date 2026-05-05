@@ -10,7 +10,8 @@ def init_db():
             balance REAL DEFAULT 0,
             is_banned INTEGER DEFAULT 0,
             referrals INTEGER DEFAULT 0,
-            ref_by INTEGER DEFAULT NULL
+            ref_by INTEGER DEFAULT NULL,
+            tasks_completed INTEGER DEFAULT 0
         )
     ''')
     cursor.execute('''
@@ -39,11 +40,12 @@ def init_db():
     conn.commit()
 
 def add_user(user_id, ref_by=None):
-    cursor.execute('INSERT OR IGNORE INTO users (user_id, ref_by) VALUES (?, ?)', (user_id, ref_by))
-    if ref_by and cursor.rowcount:
-        cursor.execute('UPDATE users SET referrals = referrals + 1 WHERE user_id = ?', (ref_by,))
-        cursor.execute('UPDATE users SET balance = balance + 3 WHERE user_id = ?', (ref_by,))
-    conn.commit()
+    cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
+    if not cursor.fetchone():
+        cursor.execute('INSERT INTO users (user_id, ref_by, tasks_completed) VALUES (?, ?, 0)', (user_id, ref_by))
+        if ref_by:
+            cursor.execute('UPDATE users SET referrals = referrals + 1 WHERE user_id = ?', (ref_by,))
+        conn.commit()
 
 def get_user(user_id):
     cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
@@ -53,8 +55,8 @@ def update_balance(user_id, delta):
     cursor.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (delta, user_id))
     conn.commit()
 
-def add_channel(channel_id, name):
-    cursor.execute('INSERT OR IGNORE INTO channels (channel_id, name) VALUES (?, ?)', (channel_id, name))
+def add_channel(channel_id, name, stars=0.25):
+    cursor.execute('INSERT OR IGNORE INTO channels (channel_id, name, stars) VALUES (?, ?, ?)', (channel_id, name, stars))
     conn.commit()
 
 def get_channels():
@@ -71,6 +73,7 @@ def is_completed(user_id, channel_id):
 
 def mark_completed(user_id, channel_id):
     cursor.execute('INSERT INTO completions (user_id, channel_id) VALUES (?, ?)', (user_id, channel_id))
+    cursor.execute('UPDATE users SET tasks_completed = tasks_completed + 1 WHERE user_id = ?', (user_id,))
     conn.commit()
 
 def add_withdrawal(user_id, amount):
@@ -100,3 +103,12 @@ def unban_user(user_id):
 def set_balance(user_id, new_balance):
     cursor.execute('UPDATE users SET balance = ? WHERE user_id = ?', (new_balance, user_id))
     conn.commit()
+
+def get_banned_users():
+    cursor.execute('SELECT user_id FROM users WHERE is_banned = 1')
+    return [row[0] for row in cursor.fetchall()]
+
+def get_user_completed_count(user_id):
+    cursor.execute('SELECT tasks_completed FROM users WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    return row[0] if row else 0
