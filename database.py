@@ -1,67 +1,51 @@
 import sqlite3
 from datetime import datetime
-import json
+import os
+
+# Создаем резервную копию старой базы, если она есть
+if os.path.exists('star_bot.db'):
+    import shutil
+    backup_name = f'star_bot_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+    shutil.copy('star_bot.db', backup_name)
+    print(f"✅ Создана резервная копия: {backup_name}")
 
 conn = sqlite3.connect('star_bot.db', check_same_thread=False)
 cursor = conn.cursor()
 
-def migrate_db():
-    """Обновляет существующую базу данных без потери данных"""
-    
-    # Получаем существующие столбцы в таблице users
-    cursor.execute("PRAGMA table_info(users)")
-    existing_columns = [col[1] for col in cursor.fetchall()]
-    
-    # Добавляем недостающие столбцы в users
-    new_columns = {
-        'username': 'TEXT',
-        'first_name': 'TEXT',
-        'last_name': 'TEXT',
-        'balance': 'REAL DEFAULT 0',
-        'is_banned': 'INTEGER DEFAULT 0',
-        'is_admin': 'INTEGER DEFAULT 0',
-        'referrals': 'INTEGER DEFAULT 0',
-        'ref_by': 'INTEGER DEFAULT NULL',
-        'tasks_completed': 'INTEGER DEFAULT 0',
-        'last_daily': 'TIMESTAMP',
-        'last_hourly': 'TIMESTAMP',
-        'total_earned': 'REAL DEFAULT 0',
-        'total_withdrawn': 'REAL DEFAULT 0',
-        'register_date': 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
-        'last_activity': 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP',
-        'language': 'TEXT DEFAULT "ru"',
-        'warns': 'INTEGER DEFAULT 0'
-    }
-    
-    for col_name, col_type in new_columns.items():
-        if col_name not in existing_columns:
-            try:
-                cursor.execute(f'ALTER TABLE users ADD COLUMN {col_name} {col_type}')
-                print(f"✅ Добавлен столбец {col_name} в users")
-            except Exception as e:
-                print(f"⚠️ Ошибка добавления {col_name}: {e}")
-    
-    # Добавляем столбец is_required в channels
-    cursor.execute("PRAGMA table_info(channels)")
-    existing_columns = [col[1] for col in cursor.fetchall()]
-    if 'is_required' not in existing_columns:
-        try:
-            cursor.execute('ALTER TABLE channels ADD COLUMN is_required INTEGER DEFAULT 0')
-            print("✅ Добавлен столбец is_required в channels")
-        except:
-            pass
-    
-    if 'stars' not in existing_columns:
-        try:
-            cursor.execute('ALTER TABLE channels ADD COLUMN stars REAL DEFAULT 0.25')
-            print("✅ Добавлен столбец stars в channels")
-        except:
-            pass
-    
-    conn.commit()
-
 def init_db():
-    """Создаёт новые таблицы, сохраняя старые данные"""
+    """Создает все таблицы с нуля, сохраняя данные через временные таблицы"""
+    
+    # Проверяем, есть ли уже данные в старой базе
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+    old_data_exists = cursor.fetchone() is not None
+    
+    if old_data_exists:
+        print("📦 Обнаружена старая база данных, переносим данные...")
+        
+        # Сохраняем старые данные во временные таблицы
+        cursor.execute('CREATE TEMP TABLE temp_users AS SELECT * FROM users')
+        cursor.execute('CREATE TEMP TABLE temp_channels AS SELECT * FROM channels')
+        cursor.execute('CREATE TEMP TABLE temp_completions AS SELECT * FROM completions')
+        cursor.execute('CREATE TEMP TABLE temp_withdrawal_requests AS SELECT * FROM withdrawal_requests')
+        cursor.execute('CREATE TEMP TABLE temp_giveaways AS SELECT * FROM giveaways')
+        cursor.execute('CREATE TEMP TABLE temp_giveaway_participants AS SELECT * FROM giveaway_participants')
+        cursor.execute('CREATE TEMP TABLE temp_games AS SELECT * FROM games')
+        conn.commit()
+        
+        # Удаляем старые таблицы
+        cursor.execute('DROP TABLE IF EXISTS users')
+        cursor.execute('DROP TABLE IF EXISTS channels')
+        cursor.execute('DROP TABLE IF EXISTS completions')
+        cursor.execute('DROP TABLE IF EXISTS withdrawal_requests')
+        cursor.execute('DROP TABLE IF EXISTS giveaways')
+        cursor.execute('DROP TABLE IF EXISTS giveaway_participants')
+        cursor.execute('DROP TABLE IF EXISTS games')
+        cursor.execute('DROP TABLE IF EXISTS transactions')
+        cursor.execute('DROP TABLE IF EXISTS referral_bonuses')
+        cursor.execute('DROP TABLE IF EXISTS stats')
+        conn.commit()
+    
+    # ========== СОЗДАНИЕ НОВЫХ ТАБЛИЦ ==========
     
     # 1. Таблица пользователей
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -183,6 +167,81 @@ def init_db():
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )''')
     
+    conn.commit()
+    
+    # ========== ВОССТАНОВЛЕНИЕ СТАРЫХ ДАННЫХ ==========
+    if old_data_exists:
+        print("📥 Восстанавливаем старые данные...")
+        
+        try:
+            # Восстанавливаем пользователей
+            cursor.execute('''
+                INSERT OR IGNORE INTO users (user_id, username, balance, is_banned, referrals, ref_by, tasks_completed, last_daily, last_hourly)
+                SELECT user_id, username, balance, is_banned, referrals, ref_by, tasks_completed, last_daily, last_hourly 
+                FROM temp_users
+            ''')
+            
+            # Восстанавливаем каналы
+            cursor.execute('''
+                INSERT OR IGNORE INTO channels (channel_id, name, stars, is_required)
+                SELECT channel_id, name, stars, is_required 
+                FROM temp_channels
+            ''')
+            
+            # Восстанавливаем выполненные задания
+            cursor.execute('''
+                INSERT OR IGNORE INTO completions (user_id, channel_id, completed_at, earned)
+                SELECT user_id, channel_id, completed_at, earned 
+                FROM temp_completions
+            ''')
+            
+            # Восстанавливаем заявки на вывод
+            cursor.execute('''
+                INSERT OR IGNORE INTO withdrawal_requests (id, user_id, username, amount, status, requested_at)
+                SELECT id, user_id, username, amount, status, requested_at 
+                FROM temp_withdrawal_requests
+            ''')
+            
+            # Восстанавливаем розыгрыши
+            cursor.execute('''
+                INSERT OR IGNORE INTO giveaways (id, title, prize, end_date, required_channels, is_active, winner_id, winner_username, message_id, created_at)
+                SELECT id, title, prize, end_date, required_channels, is_active, winner_id, winner_username, message_id, created_at 
+                FROM temp_giveaways
+            ''')
+            
+            # Восстанавливаем участников
+            cursor.execute('''
+                INSERT OR IGNORE INTO giveaway_participants (giveaway_id, user_id, username, joined_at)
+                SELECT giveaway_id, user_id, username, joined_at 
+                FROM temp_giveaway_participants
+            ''')
+            
+            # Восстанавливаем игры
+            cursor.execute('''
+                INSERT OR IGNORE INTO games (user_id, games_played, games_won)
+                SELECT user_id, games_played, games_won 
+                FROM temp_games
+            ''')
+            
+            conn.commit()
+            print("✅ Старые данные успешно восстановлены!")
+            
+            # Удаляем временные таблицы
+            cursor.execute('DROP TABLE temp_users')
+            cursor.execute('DROP TABLE temp_channels')
+            cursor.execute('DROP TABLE temp_completions')
+            cursor.execute('DROP TABLE temp_withdrawal_requests')
+            cursor.execute('DROP TABLE temp_giveaways')
+            cursor.execute('DROP TABLE temp_giveaway_participants')
+            cursor.execute('DROP TABLE temp_games')
+            conn.commit()
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка при восстановлении данных: {e}")
+            conn.rollback()
+    
+    # ========== ДОБАВЛЯЕМ ОБЯЗАТЕЛЬНЫЕ ДАННЫЕ ==========
+    
     # Добавляем обязательный канал
     cursor.execute('SELECT * FROM channels WHERE channel_id = ?', ('UralchikStars',))
     if not cursor.fetchone():
@@ -202,10 +261,16 @@ def init_db():
         print("✅ Добавлен администратор")
     else:
         cursor.execute('UPDATE users SET is_admin = 1 WHERE user_id = 7673683792')
+        cursor.execute('UPDATE users SET username = ? WHERE user_id = ?', ('admin', 7673683792))
         print("✅ Обновлен статус администратора")
     
+    # Добавляем статистику
+    cursor.execute('INSERT OR IGNORE INTO stats (stat_key, stat_value) VALUES (?, ?)', ('total_users', '0'))
+    cursor.execute('INSERT OR IGNORE INTO stats (stat_key, stat_value) VALUES (?, ?)', ('total_earned', '0'))
+    cursor.execute('INSERT OR IGNORE INTO stats (stat_key, stat_value) VALUES (?, ?)', ('total_withdrawn', '0'))
+    
     conn.commit()
-    migrate_db()
+    print("✅ База данных готова к работе!")
 
 # ========== ПОЛЬЗОВАТЕЛИ ==========
 def add_user(user_id, username, first_name=None, last_name=None, ref_by=None):
@@ -225,6 +290,11 @@ def add_user(user_id, username, first_name=None, last_name=None, ref_by=None):
                 VALUES (?, ?, ?)
             ''', (ref_by, user_id, 3))
         
+        # Обновляем статистику
+        cursor.execute('SELECT stat_value FROM stats WHERE stat_key = "total_users"')
+        total = int(cursor.fetchone()[0]) + 1
+        cursor.execute('UPDATE stats SET stat_value = ? WHERE stat_key = "total_users"', (str(total),))
+        
         conn.commit()
         return True
     else:
@@ -234,25 +304,71 @@ def add_user(user_id, username, first_name=None, last_name=None, ref_by=None):
 
 def get_user(user_id):
     cursor.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    return cursor.fetchone()
+    row = cursor.fetchone()
+    if row:
+        return {
+            'user_id': row[0],
+            'username': row[1],
+            'first_name': row[2],
+            'last_name': row[3],
+            'balance': row[4],
+            'is_banned': row[5],
+            'is_admin': row[6],
+            'referrals': row[7],
+            'ref_by': row[8],
+            'tasks_completed': row[9],
+            'last_daily': row[10],
+            'last_hourly': row[11],
+            'total_earned': row[12],
+            'total_withdrawn': row[13],
+            'register_date': row[14],
+            'last_activity': row[15],
+            'language': row[16],
+            'warns': row[17]
+        }
+    return None
 
 def get_user_by_username(username):
     cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
-    return cursor.fetchone()
+    row = cursor.fetchone()
+    if row:
+        return {
+            'user_id': row[0],
+            'username': row[1],
+            'first_name': row[2],
+            'last_name': row[3],
+            'balance': row[4],
+            'is_banned': row[5],
+            'is_admin': row[6],
+            'referrals': row[7],
+            'ref_by': row[8],
+            'tasks_completed': row[9],
+            'last_daily': row[10],
+            'last_hourly': row[11],
+            'total_earned': row[12],
+            'total_withdrawn': row[13],
+            'register_date': row[14],
+            'last_activity': row[15],
+            'language': row[16],
+            'warns': row[17]
+        }
+    return None
 
 def update_balance(user_id, delta, description=None):
     cursor.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (delta, user_id))
     
     if delta > 0:
         cursor.execute('UPDATE users SET total_earned = total_earned + ? WHERE user_id = ?', (delta, user_id))
+        cursor.execute('UPDATE stats SET stat_value = stat_value + ? WHERE stat_key = "total_earned"', (delta,))
     elif delta < 0:
         cursor.execute('UPDATE users SET total_withdrawn = total_withdrawn + ? WHERE user_id = ?', (abs(delta), user_id))
+        cursor.execute('UPDATE stats SET stat_value = stat_value + ? WHERE stat_key = "total_withdrawn"', (abs(delta),))
     
     if description:
         cursor.execute('''
-            INSERT INTO transactions (user_id, amount, type, description) 
-            VALUES (?, ?, ?, ?)
-        ''', (user_id, delta, 'earn' if delta > 0 else 'spend', description))
+            INSERT INTO transactions (user_id, amount, type, description, created_at) 
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, delta, 'earn' if delta > 0 else 'spend', description, datetime.now()))
     
     conn.commit()
 
@@ -270,6 +386,10 @@ def unban_user(user_id):
 
 def get_all_users():
     cursor.execute('SELECT user_id, username FROM users WHERE is_banned = 0')
+    return cursor.fetchall()
+
+def get_banned_users():
+    cursor.execute('SELECT user_id, username FROM users WHERE is_banned = 1')
     return cursor.fetchall()
 
 # ========== БОНУСЫ ==========
@@ -306,13 +426,13 @@ def set_hourly_claimed(user_id):
 # ========== КАНАЛЫ ==========
 def add_channel(channel_id, name, stars=0.25, admin_id=None):
     cursor.execute('''
-        INSERT OR IGNORE INTO channels (channel_id, name, stars, added_by) 
-        VALUES (?, ?, ?, ?)
-    ''', (channel_id, name, stars, admin_id))
+        INSERT OR IGNORE INTO channels (channel_id, name, stars, added_by, added_date) 
+        VALUES (?, ?, ?, ?, ?)
+    ''', (channel_id, name, stars, admin_id, datetime.now()))
     conn.commit()
 
 def get_channels():
-    cursor.execute('SELECT * FROM channels WHERE is_required = 0')
+    cursor.execute('SELECT channel_id, name, stars FROM channels WHERE is_required = 0')
     return cursor.fetchall()
 
 def get_all_channels():
@@ -329,9 +449,9 @@ def is_completed(user_id, channel_id):
 
 def mark_completed(user_id, channel_id, earned=0.25):
     cursor.execute('''
-        INSERT OR IGNORE INTO completions (user_id, channel_id, earned) 
-        VALUES (?, ?, ?)
-    ''', (user_id, channel_id, earned))
+        INSERT OR IGNORE INTO completions (user_id, channel_id, completed_at, earned) 
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, channel_id, datetime.now(), earned))
     cursor.execute('UPDATE users SET tasks_completed = tasks_completed + 1 WHERE user_id = ?', (user_id,))
     conn.commit()
 
@@ -339,6 +459,11 @@ def get_completed_count(user_id):
     cursor.execute('SELECT tasks_completed FROM users WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
     return row[0] if row else 0
+
+def reset_completions(user_id):
+    cursor.execute('DELETE FROM completions WHERE user_id = ?', (user_id,))
+    cursor.execute('UPDATE users SET tasks_completed = 0 WHERE user_id = ?', (user_id,))
+    conn.commit()
 
 # ========== ВЫВОД ==========
 def add_withdrawal(user_id, username, amount):
@@ -361,12 +486,12 @@ def update_withdrawal_status(req_id, status, processed_by=None, reject_reason=No
     ''', (status, datetime.now(), processed_by, reject_reason, req_id))
     conn.commit()
 
-# ========== РОЗЫГРЫШИ (новая версия с удалением/изменением) ==========
+# ========== РОЗЫГРЫШИ ==========
 def add_giveaway(title, prize, end_date, required_channels, created_by=None):
     cursor.execute('''
-        INSERT INTO giveaways (title, prize, end_date, required_channels, created_by, created_at) 
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (title, prize, end_date, required_channels, created_by, datetime.now()))
+        INSERT INTO giveaways (title, prize, end_date, required_channels, created_by, created_at, participants_count) 
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (title, prize, end_date, required_channels, created_by, datetime.now(), 0))
     conn.commit()
     return cursor.lastrowid
 
@@ -379,7 +504,6 @@ def get_active_giveaways():
     return cursor.fetchall()
 
 def get_all_giveaways(include_inactive=False):
-    """Получает все розыгрыши (активные и завершенные)"""
     if include_inactive:
         cursor.execute('SELECT * FROM giveaways ORDER BY created_at DESC')
     else:
@@ -391,7 +515,6 @@ def get_giveaway(giveaway_id):
     return cursor.fetchone()
 
 def update_giveaway(giveaway_id, **kwargs):
-    """Обновляет данные розыгрыша"""
     allowed_fields = ['title', 'prize', 'end_date', 'required_channels', 'is_active']
     for key, value in kwargs.items():
         if key in allowed_fields:
@@ -400,7 +523,6 @@ def update_giveaway(giveaway_id, **kwargs):
     return True
 
 def delete_giveaway(giveaway_id):
-    """Удаляет розыгрыш (и всех участников)"""
     cursor.execute('DELETE FROM giveaway_participants WHERE giveaway_id = ?', (giveaway_id,))
     cursor.execute('DELETE FROM giveaways WHERE id = ?', (giveaway_id,))
     conn.commit()
@@ -439,14 +561,6 @@ def get_giveaway_participants_count(giveaway_id):
     cursor.execute('SELECT COUNT(*) FROM giveaway_participants WHERE giveaway_id = ?', (giveaway_id,))
     return cursor.fetchone()[0]
 
-def get_expired_giveaways():
-    """Получает просроченные активные розыгрыши"""
-    cursor.execute('''
-        SELECT * FROM giveaways 
-        WHERE is_active = 1 AND end_date <= ?
-    ''', (datetime.now(),))
-    return cursor.fetchall()
-
 # ========== МИНИ-ИГРЫ ==========
 def add_game_result(user_id, won, spent=5, won_amount=25):
     cursor.execute('SELECT * FROM games WHERE user_id = ?', (user_id,))
@@ -475,9 +589,14 @@ def get_game_stats(user_id):
     return cursor.fetchone()
 
 # ========== ТРАНЗАКЦИИ ==========
-def add_transaction(user_id, amount, trans_type, description):
+def get_user_transactions(user_id, limit=10):
     cursor.execute('''
-        INSERT INTO transactions (user_id, amount, type, description, created_at) 
-        VALUES (?, ?, ?, ?, ?)
-    ''', (user_id, amount, trans_type, description, datetime.now()))
-    conn.commit()
+        SELECT amount, type, description, created_at 
+        FROM transactions 
+        WHERE user_id = ? 
+        ORDER BY created_at DESC 
+        LIMIT ?
+    ''', (user_id, limit))
+    return cursor.fetchall()
+
+print("✅ Модуль database.py загружен")
