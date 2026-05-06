@@ -1,6 +1,6 @@
 import asyncio
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -35,6 +35,7 @@ class AdminStates(StatesGroup):
 
 # ========== ПРОВЕРКА ПОДПИСКИ ==========
 async def check_subscription(user_id):
+    """Проверяет подписку на обязательный канал"""
     try:
         member = await bot.get_chat_member(chat_id=f"@{config.REQUIRED_CHANNEL}", user_id=user_id)
         if member.status in ['member', 'administrator', 'creator']:
@@ -91,7 +92,7 @@ async def start(msg: types.Message):
     last_name = msg.from_user.last_name
     
     user = get_user(user_id)
-    if user and user[4] == 1:
+    if user and user['is_banned'] == 1:
         await msg.answer("🚫 Вы заблокированы!")
         return
     
@@ -157,6 +158,11 @@ async def admin(msg: types.Message):
 async def show_tasks(call: types.CallbackQuery):
     user_id = call.from_user.id
     
+    user = get_user(user_id)
+    if user and user['is_banned'] == 1:
+        await call.answer("Вы заблокированы!", show_alert=True)
+        return
+    
     if not await check_subscription(user_id):
         await call.answer("❌ Подпишитесь на обязательный канал!", show_alert=True)
         return
@@ -170,13 +176,13 @@ async def show_tasks(call: types.CallbackQuery):
     buttons = []
     
     for ch in channels:
-        ch_id, name, stars = ch[1], ch[2], ch[3]
-        if is_completed(user_id, ch_id):
+        channel_id, name, stars = ch
+        if is_completed(user_id, channel_id):
             text += f"✅ {name} - выполнено (+{stars}⭐)\n"
         else:
             text += f"📌 {name} (+{stars}⭐)\n"
-            buttons.append([InlineKeyboardButton(text=f"🔗 Подписаться на {name}", url=f"https://t.me/{ch_id}")])
-            buttons.append([InlineKeyboardButton(text=f"✅ Готово (+{stars}⭐)", callback_data=f"complete_{ch_id}_{stars}")])
+            buttons.append([InlineKeyboardButton(text=f"🔗 Подписаться на {name}", url=f"https://t.me/{channel_id}")])
+            buttons.append([InlineKeyboardButton(text=f"✅ Готово (+{stars}⭐)", callback_data=f"complete_{channel_id}_{stars}")])
     
     if buttons:
         await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
@@ -212,10 +218,10 @@ async def complete_task(call: types.CallbackQuery):
     
     completed_count = get_completed_count(user_id)
     user = get_user(user_id)
-    if completed_count == 3 and user and user[6]:
-        update_balance(user[6], 3, f"Реферальный бонус за {user[0]}")
+    if completed_count == 3 and user and user['ref_by']:
+        update_balance(user['ref_by'], 3, f"Реферальный бонус за {user_id}")
         try:
-            await bot.send_message(user[6], f"🎉 Ваш друг выполнил 3 задания! Вы получили +3⭐")
+            await bot.send_message(user['ref_by'], f"🎉 Ваш друг выполнил 3 задания! Вы получили +3⭐")
         except:
             pass
     
@@ -231,11 +237,11 @@ async def show_balance(call: types.CallbackQuery):
         return
     
     await call.message.edit_text(
-        f"⭐ *Твой баланс:* {user[3]} Stars\n"
-        f"👥 *Приглашено друзей:* {user[5]}\n"
-        f"📋 *Выполнено заданий:* {user[7]}\n"
-        f"💰 *Всего заработано:* {user[11]} Stars\n"
-        f"💸 *Всего выведено:* {user[12]} Stars\n"
+        f"⭐ *Твой баланс:* {user['balance']} Stars\n"
+        f"👥 *Приглашено друзей:* {user['referrals']}\n"
+        f"📋 *Выполнено заданий:* {user['tasks_completed']}\n"
+        f"💰 *Всего заработано:* {user['total_earned']} Stars\n"
+        f"💸 *Всего выведено:* {user['total_withdrawn']} Stars\n"
         f"💸 *Минимальный вывод:* 15 Stars",
         reply_markup=main_menu(),
         parse_mode="Markdown"
@@ -245,7 +251,7 @@ async def show_balance(call: types.CallbackQuery):
 @dp.callback_query(F.data == "withdraw")
 async def withdraw_start(call: types.CallbackQuery, state: FSMContext):
     user = get_user(call.from_user.id)
-    if not user or user[4] == 1:
+    if not user or user['is_banned'] == 1:
         await call.answer("Доступ запрещён", show_alert=True)
         return
     
@@ -253,7 +259,7 @@ async def withdraw_start(call: types.CallbackQuery, state: FSMContext):
         await call.answer("❌ Подпишитесь на обязательный канал!", show_alert=True)
         return
     
-    if user[3] < 15:
+    if user['balance'] < 15:
         await call.answer("❌ Недостаточно Stars. Нужно минимум 15⭐", show_alert=True)
         return
     
@@ -272,8 +278,8 @@ async def process_withdraw(msg: types.Message, state: FSMContext):
             await msg.answer("❌ Минимальная сумма вывода - 15⭐")
             return
         
-        if user[3] < amount:
-            await msg.answer(f"❌ Недостаточно Stars. Ваш баланс: {user[3]}⭐")
+        if user['balance'] < amount:
+            await msg.answer(f"❌ Недостаточно Stars. Ваш баланс: {user['balance']}⭐")
             return
         
         add_withdrawal(user_id, username, amount)
@@ -293,6 +299,8 @@ async def referral(call: types.CallbackQuery):
     bot_info = await bot.get_me()
     link = f"https://t.me/{bot_info.username}?start={user_id}"
     
+    user = get_user(user_id)
+    
     await call.message.edit_text(
         f"👥 *Приглашай друзей и зарабатывай!*\n\n"
         f"🔗 Твоя реферальная ссылка:\n`{link}`\n\n"
@@ -300,7 +308,7 @@ async def referral(call: types.CallbackQuery):
         f"• Друг переходит по ссылке\n"
         f"• Выполняет 3 любых задания\n"
         f"• Ты получаешь +3⭐\n\n"
-        f"👥 *Приглашено:* {get_user(user_id)[5]} друзей",
+        f"👥 *Приглашено:* {user['referrals'] if user else 0} друзей",
         reply_markup=main_menu(),
         parse_mode="Markdown"
     )
@@ -348,7 +356,7 @@ async def fortune_game(call: types.CallbackQuery):
         await call.answer("❌ Подпишитесь на обязательный канал!", show_alert=True)
         return
     
-    if user[3] < 5:
+    if user['balance'] < 5:
         await call.answer("❌ Недостаточно Stars! Нужно 5⭐ для игры.", show_alert=True)
         return
     
@@ -372,7 +380,7 @@ async def spin_fortune(call: types.CallbackQuery):
     user_id = call.from_user.id
     user = get_user(user_id)
     
-    if user[3] < 5:
+    if user['balance'] < 5:
         await call.answer("❌ Недостаточно Stars!", show_alert=True)
         return
     
@@ -398,7 +406,7 @@ async def spin_fortune(call: types.CallbackQuery):
     
     await call.message.edit_text(
         f"{result_text}\n\n"
-        f"⭐ Ваш баланс: {user[3]} Stars\n"
+        f"⭐ Ваш баланс: {user['balance']} Stars\n"
         f"📊 Статистика: {stats[0] if stats else 0} игр, {stats[1] if stats else 0} побед",
         parse_mode="Markdown", reply_markup=keyboard
     )
@@ -421,14 +429,19 @@ async def show_giveaways(call: types.CallbackQuery):
     buttons = []
     
     for g in giveaways:
-        g_id, title, prize, end_date, req_channels, is_active, winner_id, winner_username, msg_id, channel_post_id, created_by, created_at, participants_count = g
+        g_id = g[0]
+        title = g[1]
+        prize = g[2]
+        end_date = g[3]
+        participants_count = g[12]
+        
         end = datetime.fromisoformat(end_date)
         remaining = end - datetime.now()
         hours = int(remaining.total_seconds() // 3600)
         minutes = int((remaining.total_seconds() % 3600) // 60)
         
         text += f"📌 *{title}*\n🏆 Приз: {prize}\n👥 Участников: {participants_count}\n⏰ Осталось: {hours}ч {minutes}мин\n\n"
-        buttons.append([InlineKeyboardButton(text=f"🎲 Участвовать в {title}", callback_data=f"join_giveaway_{g_id}")])
+        buttons.append([InlineKeyboardButton(text=f"🎲 Участвовать в {title[:20]}", callback_data=f"join_giveaway_{g_id}")])
     
     if buttons:
         await call.message.edit_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -474,209 +487,6 @@ async def manage_giveaways(call: types.CallbackQuery):
         return
     await call.message.edit_text("🎁 *Управление конкурсами*", parse_mode="Markdown", reply_markup=manage_giveaways_menu())
 
-@dp.callback_query(F.data == "admin_list_giveaways")
-async def list_all_giveaways(call: types.CallbackQuery):
-    if call.from_user.id != config.ADMIN_ID:
-        return
-    
-    giveaways = get_all_giveaways(include_inactive=True)
-    if not giveaways:
-        await call.answer("Нет конкурсов", show_alert=True)
-        return
-    
-    text = "📋 *Все конкурсы:*\n\n"
-    for g in giveaways:
-        g_id, title, prize, end_date, req_channels, is_active, winner_id, winner_username, msg_id, channel_post_id, created_by, created_at, participants_count = g
-        status = "🟢 Активен" if is_active else "🔴 Завершен"
-        text += f"#{g_id} *{title}*\n🏆 {prize}\n📅 До: {end_date[:16]}\n{status}\n👥 {participants_count} участников\n\n"
-    
-    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=manage_giveaways_menu())
-
-@dp.callback_query(F.data == "admin_delete_giveaway")
-async def delete_giveaway_select(call: types.CallbackQuery):
-    if call.from_user.id != config.ADMIN_ID:
-        return
-    
-    giveaways = get_all_giveaways(include_inactive=True)
-    if not giveaways:
-        await call.answer("Нет конкурсов для удаления", show_alert=True)
-        return
-    
-    buttons = []
-    for g in giveaways:
-        g_id, title, prize, end_date, _, _, _, _, _, _, _, _, _ = g
-        buttons.append([InlineKeyboardButton(text=f"🗑 {title[:30]}", callback_data=f"del_giveaway_{g_id}")])
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_manage_giveaways")])
-    
-    await call.message.edit_text("🗑 *Выберите конкурс для удаления:*", parse_mode="Markdown", 
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-@dp.callback_query(F.data.startswith("del_giveaway_"))
-async def confirm_delete_giveaway(call: types.CallbackQuery):
-    giveaway_id = int(call.data.split("_")[2])
-    giveaway = get_giveaway(giveaway_id)
-    
-    if not giveaway:
-        await call.answer("Конкурс не найден", show_alert=True)
-        return
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_del_{giveaway_id}")],
-        [InlineKeyboardButton(text="❌ Нет, отмена", callback_data="admin_manage_giveaways")]
-    ])
-    
-    await call.message.edit_text(f"⚠️ *Удалить конкурс «{giveaway[1]}»?*\nЭто действие необратимо!", 
-                                  parse_mode="Markdown", reply_markup=keyboard)
-
-@dp.callback_query(F.data.startswith("confirm_del_"))
-async def execute_delete_giveaway(call: types.CallbackQuery):
-    giveaway_id = int(call.data.split("_")[2])
-    delete_giveaway(giveaway_id)
-    await call.answer("✅ Конкурс удалён", show_alert=True)
-    await call.message.edit_text("🗑 Конкурс успешно удалён!", reply_markup=manage_giveaways_menu())
-
-@dp.callback_query(F.data == "admin_edit_giveaway")
-async def edit_giveaway_select(call: types.CallbackQuery, state: FSMContext):
-    if call.from_user.id != config.ADMIN_ID:
-        return
-    
-    giveaways = get_all_giveaways(include_inactive=True)
-    if not giveaways:
-        await call.answer("Нет конкурсов для изменения", show_alert=True)
-        return
-    
-    buttons = []
-    for g in giveaways:
-        g_id, title, prize, end_date, _, _, _, _, _, _, _, _, _ = g
-        buttons.append([InlineKeyboardButton(text=f"✏️ {title[:30]}", callback_data=f"edit_giveaway_{g_id}")])
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_manage_giveaways")])
-    
-    await call.message.edit_text("✏️ *Выберите конкурс для изменения:*", parse_mode="Markdown",
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-@dp.callback_query(F.data.startswith("edit_giveaway_"))
-async def edit_giveaway_field(call: types.CallbackQuery, state: FSMContext):
-    giveaway_id = int(call.data.split("_")[2])
-    await state.update_data(edit_giveaway_id=giveaway_id)
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📝 Название", callback_data="edit_field_title")],
-        [InlineKeyboardButton(text="🏆 Приз", callback_data="edit_field_prize")],
-        [InlineKeyboardButton(text="📅 Дата окончания", callback_data="edit_field_end_date")],
-        [InlineKeyboardButton(text="📢 Каналы спонсоров", callback_data="edit_field_channels")],
-        [InlineKeyboardButton(text="🔴 Завершить конкурс", callback_data="edit_field_end")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_manage_giveaways")]
-    ])
-    
-    giveaway = get_giveaway(giveaway_id)
-    await call.message.edit_text(f"✏️ *Редактирование конкурса:*\n\n"
-                                  f"📌 Название: {giveaway[1]}\n"
-                                  f"🏆 Приз: {giveaway[2]}\n"
-                                  f"📅 До: {giveaway[3][:16]}\n"
-                                  f"📢 Каналы: {giveaway[4] or 'нет'}\n\n"
-                                  f"*Выберите поле для изменения:*",
-                                  parse_mode="Markdown", reply_markup=keyboard)
-
-@dp.callback_query(F.data.startswith("edit_field_"))
-async def edit_giveaway_value(call: types.CallbackQuery, state: FSMContext):
-    field = call.data.split("_")[2]
-    
-    field_names = {
-        'title': 'название конкурса',
-        'prize': 'приз',
-        'end_date': 'дату окончания (ГГГГ-ММ-ДД ЧЧ:ММ)',
-        'channels': 'каналы спонсоров (через запятую, без @) или 0',
-        'end': None
-    }
-    
-    if field == 'end':
-        data = await state.get_data()
-        giveaway_id = data['edit_giveaway_id']
-        update_giveaway(giveaway_id, is_active=0)
-        await call.answer("✅ Конкурс завершён", show_alert=True)
-        await call.message.edit_text("✅ Конкурс завершён!", reply_markup=manage_giveaways_menu())
-        await state.clear()
-        return
-    
-    await state.update_data(edit_field=field)
-    await call.message.answer(f"📝 Введите новое {field_names.get(field, 'значение')}:")
-    await state.set_state(AdminStates.waiting_edit_giveaway_value)
-
-@dp.message(AdminStates.waiting_edit_giveaway_value)
-async def save_edited_giveaway_value(msg: types.Message, state: FSMContext):
-    data = await state.get_data()
-    giveaway_id = data['edit_giveaway_id']
-    field = data['edit_field']
-    value = msg.text.strip()
-    
-    if field == 'end_date':
-        try:
-            datetime.strptime(value, "%Y-%m-%d %H:%M")
-        except:
-            await msg.answer("❌ Неверный формат! Используйте: ГГГГ-ММ-ДД ЧЧ:ММ")
-            return
-    elif field == 'channels' and value == '0':
-        value = ''
-    
-    update_giveaway(giveaway_id, **{field: value})
-    await msg.answer("✅ Конкурс успешно обновлён!", reply_markup=manage_giveaways_menu())
-    await state.clear()
-
-@dp.callback_query(F.data == "admin_end_giveaway")
-async def end_giveaway_select(call: types.CallbackQuery):
-    if call.from_user.id != config.ADMIN_ID:
-        return
-    
-    giveaways = get_all_giveaways(include_inactive=False)
-    if not giveaways:
-        await call.answer("Нет активных конкурсов", show_alert=True)
-        return
-    
-    buttons = []
-    for g in giveaways:
-        g_id, title, prize, end_date, _, _, _, _, _, _, _, _, participants = g
-        if participants > 0:
-            buttons.append([InlineKeyboardButton(text=f"🎲 Завершить {title} ({participants} уч.)", callback_data=f"end_giveaway_{g_id}")])
-    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_manage_giveaways")])
-    
-    await call.message.edit_text("🎲 *Выберите конкурс для завершения и выбора победителя:*", 
-                                  parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
-
-@dp.callback_query(F.data.startswith("end_giveaway_"))
-async def execute_end_giveaway(call: types.CallbackQuery):
-    giveaway_id = int(call.data.split("_")[2])
-    giveaway = get_giveaway(giveaway_id)
-    participants = get_participants(giveaway_id)
-    
-    if not participants:
-        await call.answer("Нет участников в конкурсе!", show_alert=True)
-        return
-    
-    winner = random.choice(participants)
-    winner_id, winner_username = winner
-    
-    end_giveaway(giveaway_id, winner_id, winner_username)
-    
-    # Награждаем победителя
-    prize_text = giveaway[2]
-    if prize_text.endswith('⭐'):
-        try:
-            prize_amount = float(prize_text.replace('⭐', ''))
-            update_balance(winner_id, prize_amount, f"Выигрыш в конкурсе {giveaway[1]}")
-        except:
-            pass
-    
-    # Уведомляем победителя
-    try:
-        await bot.send_message(winner_id, f"🎉 *ПОЗДРАВЛЯЕМ!* 🎉\n\nВы выиграли в конкурсе «{giveaway[1]}»!\n🏆 Ваш приз: {giveaway[2]}\n\nСвяжитесь с администратором для получения!", parse_mode="Markdown")
-    except:
-        pass
-    
-    await call.answer(f"✅ Победитель: @{winner_username}", show_alert=True)
-    await call.message.edit_text(f"🎉 *Конкурс завершён!*\n\nПобедитель: @{winner_username}\nПриз: {giveaway[2]}", 
-                                  parse_mode="Markdown", reply_markup=manage_giveaways_menu())
-
-# ========== АДМИН: ОСТАЛЬНЫЕ ФУНКЦИИ ==========
 @dp.callback_query(F.data == "admin_create_giveaway")
 async def create_giveaway_step1(call: types.CallbackQuery, state: FSMContext):
     if call.from_user.id != config.ADMIN_ID:
@@ -736,6 +546,220 @@ async def create_giveaway_step5(msg: types.Message, state: FSMContext):
     await msg.answer(f"✅ Розыгрыш «{data['title']}» создан!", reply_markup=manage_giveaways_menu())
     await state.clear()
 
+@dp.callback_query(F.data == "admin_list_giveaways")
+async def list_all_giveaways(call: types.CallbackQuery):
+    if call.from_user.id != config.ADMIN_ID:
+        return
+    
+    giveaways = get_all_giveaways(include_inactive=True)
+    if not giveaways:
+        await call.answer("Нет конкурсов", show_alert=True)
+        return
+    
+    text = "📋 *Все конкурсы:*\n\n"
+    for g in giveaways:
+        g_id = g[0]
+        title = g[1]
+        prize = g[2]
+        end_date = g[3]
+        is_active = g[5]
+        participants_count = g[12]
+        status = "🟢 Активен" if is_active else "🔴 Завершен"
+        text += f"#{g_id} *{title}*\n🏆 {prize}\n📅 До: {end_date[:16]}\n{status}\n👥 {participants_count} участников\n\n"
+    
+    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=manage_giveaways_menu())
+
+@dp.callback_query(F.data == "admin_delete_giveaway")
+async def delete_giveaway_select(call: types.CallbackQuery):
+    if call.from_user.id != config.ADMIN_ID:
+        return
+    
+    giveaways = get_all_giveaways(include_inactive=True)
+    if not giveaways:
+        await call.answer("Нет конкурсов для удаления", show_alert=True)
+        return
+    
+    buttons = []
+    for g in giveaways:
+        g_id = g[0]
+        title = g[1]
+        buttons.append([InlineKeyboardButton(text=f"🗑 {title[:30]}", callback_data=f"del_giveaway_{g_id}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_manage_giveaways")])
+    
+    await call.message.edit_text("🗑 *Выберите конкурс для удаления:*", parse_mode="Markdown", 
+                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@dp.callback_query(F.data.startswith("del_giveaway_"))
+async def confirm_delete_giveaway(call: types.CallbackQuery):
+    giveaway_id = int(call.data.split("_")[2])
+    giveaway = get_giveaway(giveaway_id)
+    
+    if not giveaway:
+        await call.answer("Конкурс не найден", show_alert=True)
+        return
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_del_{giveaway_id}")],
+        [InlineKeyboardButton(text="❌ Нет, отмена", callback_data="admin_manage_giveaways")]
+    ])
+    
+    await call.message.edit_text(f"⚠️ *Удалить конкурс «{giveaway[1]}»?*\nЭто действие необратимо!", 
+                                  parse_mode="Markdown", reply_markup=keyboard)
+
+@dp.callback_query(F.data.startswith("confirm_del_"))
+async def execute_delete_giveaway(call: types.CallbackQuery):
+    giveaway_id = int(call.data.split("_")[2])
+    delete_giveaway(giveaway_id)
+    await call.answer("✅ Конкурс удалён", show_alert=True)
+    await call.message.edit_text("🗑 Конкурс успешно удалён!", reply_markup=manage_giveaways_menu())
+
+@dp.callback_query(F.data == "admin_edit_giveaway")
+async def edit_giveaway_select(call: types.CallbackQuery, state: FSMContext):
+    if call.from_user.id != config.ADMIN_ID:
+        return
+    
+    giveaways = get_all_giveaways(include_inactive=True)
+    if not giveaways:
+        await call.answer("Нет конкурсов для изменения", show_alert=True)
+        return
+    
+    buttons = []
+    for g in giveaways:
+        g_id = g[0]
+        title = g[1]
+        buttons.append([InlineKeyboardButton(text=f"✏️ {title[:30]}", callback_data=f"edit_giveaway_{g_id}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_manage_giveaways")])
+    
+    await call.message.edit_text("✏️ *Выберите конкурс для изменения:*", parse_mode="Markdown",
+                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@dp.callback_query(F.data.startswith("edit_giveaway_"))
+async def edit_giveaway_field(call: types.CallbackQuery, state: FSMContext):
+    giveaway_id = int(call.data.split("_")[2])
+    await state.update_data(edit_giveaway_id=giveaway_id)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📝 Название", callback_data="edit_field_title")],
+        [InlineKeyboardButton(text="🏆 Приз", callback_data="edit_field_prize")],
+        [InlineKeyboardButton(text="📅 Дата окончания", callback_data="edit_field_end_date")],
+        [InlineKeyboardButton(text="📢 Каналы спонсоров", callback_data="edit_field_channels")],
+        [InlineKeyboardButton(text="🔴 Завершить конкурс", callback_data="edit_field_end")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="admin_manage_giveaways")]
+    ])
+    
+    giveaway = get_giveaway(giveaway_id)
+    await call.message.edit_text(f"✏️ *Редактирование конкурса:*\n\n"
+                                  f"📌 Название: {giveaway[1]}\n"
+                                  f"🏆 Приз: {giveaway[2]}\n"
+                                  f"📅 До: {giveaway[3][:16]}\n"
+                                  f"📢 Каналы: {giveaway[4] or 'нет'}\n\n"
+                                  f"*Выберите поле для изменения:*",
+                                  parse_mode="Markdown", reply_markup=keyboard)
+
+@dp.callback_query(F.data.startswith("edit_field_"))
+async def edit_giveaway_value(call: types.CallbackQuery, state: FSMContext):
+    field = call.data.split("_")[2]
+    
+    if field == 'end':
+        data = await state.get_data()
+        giveaway_id = data['edit_giveaway_id']
+        update_giveaway(giveaway_id, is_active=0)
+        await call.answer("✅ Конкурс завершён", show_alert=True)
+        await call.message.edit_text("✅ Конкурс завершён!", reply_markup=manage_giveaways_menu())
+        await state.clear()
+        return
+    
+    await state.update_data(edit_field=field)
+    
+    prompts = {
+        'title': 'Введите новое название конкурса:',
+        'prize': 'Введите новый приз:',
+        'end_date': 'Введите новую дату (ГГГГ-ММ-ДД ЧЧ:ММ):',
+        'channels': 'Введите новые каналы (через запятую, без @) или 0:'
+    }
+    
+    await call.message.answer(prompts.get(field, 'Введите новое значение:'))
+    await state.set_state(AdminStates.waiting_edit_giveaway_value)
+
+@dp.message(AdminStates.waiting_edit_giveaway_value)
+async def save_edited_giveaway_value(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
+    giveaway_id = data['edit_giveaway_id']
+    field = data['edit_field']
+    value = msg.text.strip()
+    
+    if field == 'end_date':
+        try:
+            datetime.strptime(value, "%Y-%m-%d %H:%M")
+        except:
+            await msg.answer("❌ Неверный формат! Используйте: ГГГГ-ММ-ДД ЧЧ:ММ")
+            return
+    elif field == 'channels' and value == '0':
+        value = ''
+    
+    update_giveaway(giveaway_id, **{field: value})
+    await msg.answer("✅ Конкурс успешно обновлён!", reply_markup=manage_giveaways_menu())
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_end_giveaway")
+async def end_giveaway_select(call: types.CallbackQuery):
+    if call.from_user.id != config.ADMIN_ID:
+        return
+    
+    giveaways = get_active_giveaways()
+    if not giveaways:
+        await call.answer("Нет активных конкурсов", show_alert=True)
+        return
+    
+    buttons = []
+    for g in giveaways:
+        g_id = g[0]
+        title = g[1]
+        participants = g[12]
+        if participants > 0:
+            buttons.append([InlineKeyboardButton(text=f"🎲 Завершить {title[:25]} ({participants} уч.)", callback_data=f"end_giveaway_{g_id}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_manage_giveaways")])
+    
+    if not buttons:
+        await call.answer("Нет конкурсов с участниками", show_alert=True)
+        return
+    
+    await call.message.edit_text("🎲 *Выберите конкурс для завершения и выбора победителя:*", 
+                                  parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@dp.callback_query(F.data.startswith("end_giveaway_"))
+async def execute_end_giveaway(call: types.CallbackQuery):
+    giveaway_id = int(call.data.split("_")[2])
+    giveaway = get_giveaway(giveaway_id)
+    participants = get_participants(giveaway_id)
+    
+    if not participants:
+        await call.answer("Нет участников в конкурсе!", show_alert=True)
+        return
+    
+    winner = random.choice(participants)
+    winner_id, winner_username = winner
+    
+    end_giveaway(giveaway_id, winner_id, winner_username)
+    
+    prize_text = giveaway[2]
+    if '⭐' in prize_text:
+        try:
+            prize_amount = float(prize_text.replace('⭐', '').strip())
+            update_balance(winner_id, prize_amount, f"Выигрыш в конкурсе {giveaway[1]}")
+        except:
+            pass
+    
+    try:
+        await bot.send_message(winner_id, f"🎉 *ПОЗДРАВЛЯЕМ!* 🎉\n\nВы выиграли в конкурсе «{giveaway[1]}»!\n🏆 Ваш приз: {giveaway[2]}\n\nСвяжитесь с администратором для получения!", parse_mode="Markdown")
+    except:
+        pass
+    
+    await call.answer(f"✅ Победитель: @{winner_username}", show_alert=True)
+    await call.message.edit_text(f"🎉 *Конкурс завершён!*\n\nПобедитель: @{winner_username}\nПриз: {giveaway[2]}", 
+                                  parse_mode="Markdown", reply_markup=manage_giveaways_menu())
+
+# ========== АДМИН: ОСТАЛЬНЫЕ ФУНКЦИИ ==========
 @dp.callback_query(F.data == "admin_add_channel")
 async def add_channel_step1(call: types.CallbackQuery, state: FSMContext):
     if call.from_user.id != config.ADMIN_ID:
@@ -773,8 +797,12 @@ async def list_channels(call: types.CallbackQuery):
     channels = get_all_channels()
     text = "📋 *Все каналы:*\n\n"
     for ch in channels:
-        required = "🔒 ОБЯЗАТЕЛЬНЫЙ" if ch[4] else "📌 Обычный"
-        text += f"• {ch[2]}: @{ch[1]} | {ch[3]}⭐ | {required}\n"
+        ch_id = ch[1]
+        name = ch[2]
+        stars = ch[3]
+        is_required = ch[4]
+        required = "🔒 ОБЯЗАТЕЛЬНЫЙ" if is_required else "📌 Обычный"
+        text += f"• {name}: @{ch_id} | {stars}⭐ | {required}\n"
     await call.message.edit_text(text, parse_mode="Markdown", reply_markup=admin_panel())
 
 @dp.callback_query(F.data == "admin_del_channel")
@@ -785,7 +813,7 @@ async def delete_channel_menu(call: types.CallbackQuery):
     if not channels:
         await call.answer("Нет каналов для удаления", show_alert=True)
         return
-    buttons = [[InlineKeyboardButton(text=f"❌ {ch[2]}", callback_data=f"delch_{ch[1]}")] for ch in channels]
+    buttons = [[InlineKeyboardButton(text=f"❌ {ch[1]}", callback_data=f"delch_{ch[0]}")] for ch in channels]
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
     await call.message.edit_text("🗑 Выберите канал для удаления:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
@@ -819,8 +847,8 @@ async def give_balance_step2(msg: types.Message, state: FSMContext):
         await state.clear()
         return
     
-    await state.update_data(target_user=user[0])
-    await msg.answer(f"💰 Введите сумму для начисления @{user[1] or user[0]}:\nТекущий баланс: {user[3]}⭐")
+    await state.update_data(target_user=user['user_id'])
+    await msg.answer(f"💰 Введите сумму для начисления @{user['username'] or user['user_id']}:\nТекущий баланс: {user['balance']}⭐")
     await state.set_state(AdminStates.waiting_balance_amount)
 
 @dp.message(AdminStates.waiting_balance_amount)
@@ -831,9 +859,9 @@ async def give_balance_step3(msg: types.Message, state: FSMContext):
         user_id = data['target_user']
         update_balance(user_id, amount, f"Начислено администратором")
         user = get_user(user_id)
-        await msg.answer(f"✅ Начислено {amount}⭐ пользователю @{user[1] or user_id}\nНовый баланс: {user[3]}⭐")
+        await msg.answer(f"✅ Начислено {amount}⭐ пользователю @{user['username'] or user_id}\nНовый баланс: {user['balance']}⭐")
         try:
-            await bot.send_message(user_id, f"💰 Администратор начислил вам {amount}⭐!\nВаш баланс: {user[3]}⭐")
+            await bot.send_message(user_id, f"💰 Администратор начислил вам {amount}⭐!\nВаш баланс: {user['balance']}⭐")
         except:
             pass
         await state.clear()
@@ -908,12 +936,12 @@ async def process_ban(msg: types.Message, state: FSMContext):
         await state.clear()
         return
     
-    if user[4] == 1:
-        unban_user(user[0])
-        await msg.answer(f"✅ Пользователь @{user[1] or user[0]} разблокирован")
+    if user['is_banned'] == 1:
+        unban_user(user['user_id'])
+        await msg.answer(f"✅ Пользователь @{user['username'] or user['user_id']} разблокирован")
     else:
-        ban_user(user[0])
-        await msg.answer(f"✅ Пользователь @{user[1] or user[0]} заблокирован")
+        ban_user(user['user_id'])
+        await msg.answer(f"✅ Пользователь @{user['username'] or user['user_id']} заблокирован")
     await state.clear()
 
 @dp.callback_query(F.data == "admin_broadcast")
@@ -967,20 +995,20 @@ async def check_user_result(msg: types.Message, state: FSMContext):
         await state.clear()
         return
     
-    is_subbed = await check_subscription(user[0])
+    is_subbed = await check_subscription(user['user_id'])
     
     text = (
         f"🔍 *Информация о пользователе*\n\n"
-        f"🆔 ID: `{user[0]}`\n"
-        f"📝 Username: @{user[1] or 'нет'}\n"
-        f"👤 Имя: {user[2] or 'нет'}\n"
-        f"⭐ Баланс: {user[3]} Stars\n"
-        f"🚫 Статус: {'Заблокирован' if user[4] else 'Активен'}\n"
-        f"👥 Рефералов: {user[5]}\n"
-        f"📋 Выполнено заданий: {user[7]}\n"
-        f"💰 Всего заработано: {user[11]} Stars\n"
-        f"💸 Всего выведено: {user[12]} Stars\n"
-        f"📅 Дата регистрации: {user[13][:16]}\n\n"
+        f"🆔 ID: `{user['user_id']}`\n"
+        f"📝 Username: @{user['username'] or 'нет'}\n"
+        f"👤 Имя: {user['first_name'] or 'нет'}\n"
+        f"⭐ Баланс: {user['balance']} Stars\n"
+        f"🚫 Статус: {'Заблокирован' if user['is_banned'] else 'Активен'}\n"
+        f"👥 Рефералов: {user['referrals']}\n"
+        f"📋 Выполнено заданий: {user['tasks_completed']}\n"
+        f"💰 Всего заработано: {user['total_earned']} Stars\n"
+        f"💸 Всего выведено: {user['total_withdrawn']} Stars\n"
+        f"📅 Дата регистрации: {user['register_date'][:16] if user['register_date'] else 'нет'}\n\n"
         f"📢 *Обязательный канал:*\n"
         f"{'✅ Подписан' if is_subbed else '❌ НЕ ПОДПИСАН'}"
     )
@@ -1001,6 +1029,7 @@ async def main():
     init_db()
     print("🤖 Бот запущен!")
     print(f"✅ Обязательный канал: @{config.REQUIRED_CHANNEL}")
+    print(f"✅ Админ ID: {config.ADMIN_ID}")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
