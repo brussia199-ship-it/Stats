@@ -1,54 +1,36 @@
 import sqlite3
 from datetime import datetime
 import os
+import shutil
 
-# Создаем резервную копию старой базы, если она есть
-if os.path.exists('star_bot.db'):
-    import shutil
-    backup_name = f'star_bot_backup_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
-    shutil.copy('star_bot.db', backup_name)
-    print(f"✅ Создана резервная копия: {backup_name}")
+# Проверяем и восстанавливаем базу данных
+db_path = 'star_bot.db'
 
-conn = sqlite3.connect('star_bot.db', check_same_thread=False)
+# Если файл существует, проверяем его целостность
+if os.path.exists(db_path):
+    try:
+        # Пробуем открыть существующую базу
+        test_conn = sqlite3.connect(db_path)
+        test_conn.execute("SELECT 1")
+        test_conn.close()
+        print("✅ Существующая база данных в порядке")
+    except Exception as e:
+        print(f"⚠️ База данных повреждена: {e}")
+        # Создаём резервную копию повреждённой базы
+        backup_name = f'star_bot_corrupted_{datetime.now().strftime("%Y%m%d_%H%M%S")}.db'
+        shutil.move(db_path, backup_name)
+        print(f"📦 Повреждённая база перемещена в: {backup_name}")
+        print("🔄 Создаётся новая база данных...")
+
+conn = sqlite3.connect(db_path, check_same_thread=False)
 cursor = conn.cursor()
 
 def init_db():
-    """Создает все таблицы с нуля, сохраняя данные через временные таблицы"""
+    """Создает все таблицы с нуля"""
     
-    # Проверяем, есть ли уже данные в старой базе
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
-    old_data_exists = cursor.fetchone() is not None
+    print("🔄 Инициализация базы данных...")
     
-    if old_data_exists:
-        print("📦 Обнаружена старая база данных, переносим данные...")
-        
-        # Сохраняем старые данные во временные таблицы
-        tables = ['users', 'channels', 'completions', 'withdrawal_requests', 'giveaways', 'giveaway_participants', 'games']
-        for table in tables:
-            try:
-                cursor.execute(f'CREATE TEMP TABLE temp_{table} AS SELECT * FROM {table}')
-            except:
-                pass
-        conn.commit()
-        
-        # Удаляем старые таблицы
-        for table in tables:
-            try:
-                cursor.execute(f'DROP TABLE IF EXISTS {table}')
-            except:
-                pass
-        
-        # Удаляем новые таблицы если есть
-        cursor.execute('DROP TABLE IF EXISTS transactions')
-        cursor.execute('DROP TABLE IF EXISTS referral_bonuses')
-        cursor.execute('DROP TABLE IF EXISTS stats')
-        cursor.execute('DROP TABLE IF EXISTS admins')
-        cursor.execute('DROP TABLE IF EXISTS promocodes')
-        cursor.execute('DROP TABLE IF EXISTS promocode_uses')
-        cursor.execute('DROP TABLE IF EXISTS donations')
-        conn.commit()
-    
-    # ========== СОЗДАНИЕ НОВЫХ ТАБЛИЦ ==========
+    # ========== СОЗДАНИЕ ТАБЛИЦ ==========
     
     # 1. Таблица пользователей
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -212,33 +194,6 @@ def init_db():
     
     conn.commit()
     
-    # ========== ВОССТАНОВЛЕНИЕ СТАРЫХ ДАННЫХ ==========
-    if old_data_exists:
-        print("📥 Восстанавливаем старые данные...")
-        
-        try:
-            tables_to_restore = ['users', 'channels', 'completions', 'withdrawal_requests', 'giveaways', 'giveaway_participants', 'games']
-            for table in tables_to_restore:
-                try:
-                    cursor.execute(f'INSERT OR IGNORE INTO {table} SELECT * FROM temp_{table}')
-                    print(f"✅ Восстановлена таблица {table}")
-                except Exception as e:
-                    print(f"⚠️ Ошибка восстановления {table}: {e}")
-            
-            conn.commit()
-            
-            # Удаляем временные таблицы
-            for table in tables_to_restore:
-                try:
-                    cursor.execute(f'DROP TABLE temp_{table}')
-                except:
-                    pass
-            
-            print("✅ Старые данные успешно восстановлены!")
-        except Exception as e:
-            print(f"⚠️ Ошибка при восстановлении данных: {e}")
-            conn.rollback()
-    
     # ========== ДОБАВЛЯЕМ ОБЯЗАТЕЛЬНЫЕ ДАННЫЕ ==========
     
     # Добавляем обязательный канал
@@ -256,6 +211,15 @@ def init_db():
         cursor.execute('INSERT INTO admins (user_id, added_by) VALUES (?, ?)', (8508338715, 8508338715))
         cursor.execute('UPDATE users SET is_admin = 1 WHERE user_id = ?', (8508338715,))
         print("✅ Добавлен главный администратор")
+    
+    # Добавляем пользователя для админа, если его нет
+    cursor.execute('SELECT * FROM users WHERE user_id = ?', (8508338715,))
+    if not cursor.fetchone():
+        cursor.execute('''
+            INSERT INTO users (user_id, username, is_admin, balance, register_date) 
+            VALUES (?, ?, ?, ?, ?)
+        ''', (8508338715, 'admin', 1, 0, datetime.now()))
+        print("✅ Добавлен пользователь-администратор")
     
     # Добавляем статистику
     cursor.execute('INSERT OR IGNORE INTO stats (stat_key, stat_value) VALUES (?, ?)', ('total_users', '0'))
@@ -354,10 +318,10 @@ def update_balance(user_id, delta, description=None):
     
     if delta > 0:
         cursor.execute('UPDATE users SET total_earned = total_earned + ? WHERE user_id = ?', (delta, user_id))
-        cursor.execute('UPDATE stats SET stat_value = stat_value + ? WHERE stat_key = "total_earned"', (delta,))
+        cursor.execute('UPDATE stats SET stat_value = CAST(stat_value AS REAL) + ? WHERE stat_key = "total_earned"', (delta,))
     elif delta < 0:
         cursor.execute('UPDATE users SET total_withdrawn = total_withdrawn + ? WHERE user_id = ?', (abs(delta), user_id))
-        cursor.execute('UPDATE stats SET stat_value = stat_value + ? WHERE stat_key = "total_withdrawn"', (abs(delta),))
+        cursor.execute('UPDATE stats SET stat_value = CAST(stat_value AS REAL) + ? WHERE stat_key = "total_withdrawn"', (abs(delta),))
     
     if description:
         cursor.execute('''
@@ -455,11 +419,6 @@ def get_completed_count(user_id):
     row = cursor.fetchone()
     return row[0] if row else 0
 
-def reset_completions(user_id):
-    cursor.execute('DELETE FROM completions WHERE user_id = ?', (user_id,))
-    cursor.execute('UPDATE users SET tasks_completed = 0 WHERE user_id = ?', (user_id,))
-    conn.commit()
-
 # ========== ВЫВОД ==========
 def add_withdrawal(user_id, username, amount):
     cursor.execute('''
@@ -552,10 +511,6 @@ def set_giveaway_message_id(giveaway_id, message_id):
     cursor.execute('UPDATE giveaways SET message_id = ? WHERE id = ?', (message_id, giveaway_id))
     conn.commit()
 
-def get_giveaway_participants_count(giveaway_id):
-    cursor.execute('SELECT COUNT(*) FROM giveaway_participants WHERE giveaway_id = ?', (giveaway_id,))
-    return cursor.fetchone()[0]
-
 # ========== МИНИ-ИГРЫ ==========
 def add_game_result(user_id, won, spent=5, won_amount=25):
     cursor.execute('SELECT * FROM games WHERE user_id = ?', (user_id,))
@@ -585,7 +540,6 @@ def get_game_stats(user_id):
 
 # ========== УПРАВЛЕНИЕ АДМИНАМИ ==========
 def add_admin(user_id, added_by):
-    """Добавляет администратора"""
     cursor.execute('INSERT OR IGNORE INTO admins (user_id, added_by, added_at) VALUES (?, ?, ?)', 
                    (user_id, added_by, datetime.now()))
     cursor.execute('UPDATE users SET is_admin = 1 WHERE user_id = ?', (user_id,))
@@ -593,14 +547,12 @@ def add_admin(user_id, added_by):
     return cursor.rowcount > 0
 
 def remove_admin(user_id):
-    """Удаляет администратора"""
     cursor.execute('DELETE FROM admins WHERE user_id = ?', (user_id,))
     cursor.execute('UPDATE users SET is_admin = 0 WHERE user_id = ?', (user_id,))
     conn.commit()
     return cursor.rowcount > 0
 
 def get_all_admins():
-    """Получает всех администраторов"""
     cursor.execute('''
         SELECT a.user_id, u.username, a.added_by, a.added_at 
         FROM admins a
@@ -609,13 +561,11 @@ def get_all_admins():
     return cursor.fetchall()
 
 def is_admin(user_id):
-    """Проверяет, является ли пользователь администратором"""
     cursor.execute('SELECT 1 FROM admins WHERE user_id = ?', (user_id,))
     return cursor.fetchone() is not None
 
 # ========== ПРОМОКОДЫ ==========
 def create_promocode(code, reward, max_uses, expires_at=None, created_by=None):
-    """Создает новый промокод"""
     cursor.execute('''
         INSERT INTO promocodes (code, reward, uses_left, max_uses, created_by, expires_at, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -624,34 +574,28 @@ def create_promocode(code, reward, max_uses, expires_at=None, created_by=None):
     return cursor.lastrowid
 
 def get_promocode(code):
-    """Получает информацию о промокоде"""
     cursor.execute('SELECT * FROM promocodes WHERE code = ?', (code.upper(),))
     return cursor.fetchone()
 
 def use_promocode(code, user_id):
-    """Использует промокод"""
     cursor.execute('SELECT * FROM promocodes WHERE code = ? AND is_active = 1 AND uses_left > 0', (code.upper(),))
     promo = cursor.fetchone()
     
     if not promo:
         return False, "Промокод не найден или неактивен"
     
-    # Проверяем срок действия
     if promo[8] and datetime.fromisoformat(promo[8]) < datetime.now():
         cursor.execute('UPDATE promocodes SET is_active = 0 WHERE code = ?', (code.upper(),))
         conn.commit()
         return False, "Срок действия промокода истек"
     
-    # Проверяем, использовал ли пользователь
     cursor.execute('SELECT 1 FROM promocode_uses WHERE code = ? AND user_id = ?', (code.upper(), user_id))
     if cursor.fetchone():
         return False, "Вы уже использовали этот промокод"
     
-    # Начисляем награду
     reward = promo[2]
     update_balance(user_id, reward, f"Промокод: {code}")
     
-    # Обновляем счетчик
     uses_left = promo[4] - 1
     cursor.execute('UPDATE promocodes SET uses_left = ? WHERE code = ?', (uses_left, code.upper()))
     cursor.execute('INSERT INTO promocode_uses (code, user_id, used_at) VALUES (?, ?, ?)', 
@@ -664,26 +608,17 @@ def use_promocode(code, user_id):
     return True, f"Вы получили {reward}⭐"
 
 def get_all_promocodes():
-    """Получает все промокоды"""
     cursor.execute('SELECT * FROM promocodes ORDER BY created_at DESC')
     return cursor.fetchall()
 
 def delete_promocode(code):
-    """Удаляет промокод"""
     cursor.execute('DELETE FROM promocodes WHERE code = ?', (code.upper(),))
     cursor.execute('DELETE FROM promocode_uses WHERE code = ?', (code.upper(),))
     conn.commit()
     return cursor.rowcount > 0
 
-def get_promocode_stats(code):
-    """Получает статистику использования промокода"""
-    cursor.execute('SELECT COUNT(*) FROM promocode_uses WHERE code = ?', (code.upper(),))
-    used_count = cursor.fetchone()[0]
-    return used_count
-
 # ========== ДОНАТЫ ==========
 def create_donation(user_id, username, amount):
-    """Создает запрос на донат"""
     cursor.execute('''
         INSERT INTO donations (user_id, username, amount, created_at, status)
         VALUES (?, ?, ?, ?, ?)
@@ -692,33 +627,23 @@ def create_donation(user_id, username, amount):
     return cursor.lastrowid
 
 def get_pending_donations():
-    """Получает ожидающие донаты"""
     cursor.execute('SELECT * FROM donations WHERE status = "pending" ORDER BY created_at DESC')
     return cursor.fetchall()
 
 def get_all_donations():
-    """Получает все донаты"""
     cursor.execute('SELECT * FROM donations ORDER BY created_at DESC')
     return cursor.fetchall()
 
-def get_user_donations(user_id):
-    """Получает донаты пользователя"""
-    cursor.execute('SELECT * FROM donations WHERE user_id = ? ORDER BY created_at DESC', (user_id,))
-    return cursor.fetchall()
+def get_donation(donation_id):
+    cursor.execute('SELECT * FROM donations WHERE id = ?', (donation_id,))
+    return cursor.fetchone()
 
 def update_donation_status(donation_id, status, paid_at=None):
-    """Обновляет статус доната"""
     cursor.execute('UPDATE donations SET status = ?, paid_at = ? WHERE id = ?', 
                    (status, paid_at or datetime.now(), donation_id))
     conn.commit()
 
-def get_donation(donation_id):
-    """Получает информацию о донате"""
-    cursor.execute('SELECT * FROM donations WHERE id = ?', (donation_id,))
-    return cursor.fetchone()
-
 def update_donation_payment_link(donation_id, payment_link):
-    """Обновляет ссылку на оплату доната"""
     cursor.execute('UPDATE donations SET payment_link = ? WHERE id = ?', (payment_link, donation_id))
     conn.commit()
 
