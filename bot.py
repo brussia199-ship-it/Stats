@@ -279,6 +279,112 @@ async def show_balance(call: types.CallbackQuery):
         parse_mode="Markdown"
     )
 
+# ========== ПРОМОКОДЫ (ДЛЯ ПОЛЬЗОВАТЕЛЕЙ) ==========
+@dp.callback_query(F.data == "enter_promocode")
+async def enter_promocode_start(call: types.CallbackQuery, state: FSMContext):
+    """Кнопка для ввода промокода"""
+    user_id = call.from_user.id
+    
+    # Проверка подписки
+    if not await check_subscription(user_id):
+        await call.answer("❌ Подпишитесь на обязательный канал!", show_alert=True)
+        return
+    
+    # Отправляем сообщение с просьбой ввести промокод
+    await call.message.edit_text(
+        "🎫 *Введите промокод:*\n\n"
+        "Пример: `SUMMER2024` или `WELCOME10`\n\n"
+        "Промокод можно получить у администратора или в наших соцсетях.",
+        parse_mode="Markdown"
+    )
+    await state.set_state(AdminStates.waiting_user_promocode)
+
+@dp.message(AdminStates.waiting_user_promocode)
+async def process_promocode(msg: types.Message, state: FSMContext):
+    """Обработка введённого промокода"""
+    code = msg.text.strip().upper()
+    user_id = msg.from_user.id
+    
+    print(f"🔍 Проверка промокода: {code} от пользователя {user_id}")
+    
+    # Проверяем промокод в базе
+    promo = get_promocode(code)
+    
+    if not promo:
+        await msg.answer(
+            f"❌ Промокод `{code}` не найден!\n\n"
+            f"Проверьте правильность ввода или обратитесь к администратору.",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+        await state.clear()
+        return
+    
+    # Проверяем активность
+    if not promo[8]:  # is_active
+        await msg.answer(
+            f"❌ Промокод `{code}`已经不活跃!",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+        await state.clear()
+        return
+    
+    # Проверяем остаток использований
+    if promo[3] <= 0:  # uses_left
+        await msg.answer(
+            f"❌ Промокод `{code}` уже использован максимальное количество раз!",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+        await state.clear()
+        return
+    
+    # Проверяем срок действия
+    if promo[7]:  # expires_at
+        expires = datetime.fromisoformat(promo[7])
+        if expires < datetime.now():
+            await msg.answer(
+                f"❌ Срок действия промокода `{code}` истёк!",
+                parse_mode="Markdown",
+                reply_markup=main_menu()
+            )
+            await state.clear()
+            return
+    
+    # Проверяем, использовал ли пользователь уже этот промокод
+    cursor.execute('SELECT 1 FROM promocode_uses WHERE code = ? AND user_id = ?', (code, user_id))
+    if cursor.fetchone():
+        await msg.answer(
+            f"❌ Вы уже использовали промокод `{code}`!\n"
+            f"Каждый промокод можно использовать только один раз.",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+        await state.clear()
+        return
+    
+    # Используем промокод
+    success, message = use_promocode(code, user_id)
+    
+    if success:
+        user = get_user(user_id)
+        await msg.answer(
+            f"✅ *{message}*\n\n"
+            f"⭐ *Ваш баланс:* {user['balance']} Stars\n\n"
+            f"Спасибо за использование промокода!",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+    else:
+        await msg.answer(
+            f"❌ *Ошибка:* {message}",
+            parse_mode="Markdown",
+            reply_markup=main_menu()
+        )
+    
+    await state.clear()
+
 # ========== ВЫВОД ==========
 @dp.callback_query(F.data == "withdraw")
 async def withdraw_start(call: types.CallbackQuery, state: FSMContext):
